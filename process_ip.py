@@ -1,45 +1,17 @@
-import os
-import gzip
-import shutil
+import time
 import requests
-import geoip2.database
 
-# 数据源与离线数据库 CDN 地址
 IP_URL = "https://ip.ehb.cc.cd/198"
-# 自动获取 GitHub/jsDelivr 镜像维护的免费 GeoLite2 City 离线库
-DB_URL = "https://cdn.jsdelivr.net/npm/geolite2-city/GeoLite2-City.mmdb.gz"
-DB_GZ = "GeoLite2-City.mmdb.gz"
-DB_FILE = "GeoLite2-City.mmdb"
-
-def prepare_database():
-    """自动下载并解压 GeoLite2 本地数据库"""
-    if not os.path.exists(DB_FILE):
-        print("▶ [1/4] 正在下载 GeoLite2 离线数据库...")
-        headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(DB_URL, headers=headers, stream=True, timeout=30)
-        res.raise_for_status()
-        
-        with open(DB_GZ, 'wb') as f:
-            f.write(res.content)
-        
-        print("▶ [2/4] 正在解压数据库文件...")
-        with gzip.open(DB_GZ, 'rb') as f_in:
-            with open(DB_FILE, 'wb') as f_out:
-                shutil.copyfileobj(f_in, f_out)
-        
-        # 清理压缩包
-        if os.path.exists(DB_GZ):
-            os.remove(DB_GZ)
-        print("✔ 离线数据库准备就绪！")
+# 使用支持批量查询且对机房/CDN IP识别精准的免费接口
+BATCH_API_URL = "https://api.ipquery.io/"
 
 def get_ip_list():
     """从目标 URL 获取 IP 列表"""
-    print(f"▶ [3/4] 正在从 {IP_URL} 获取 IP 列表...")
+    print(f"▶ 正在从 {IP_URL} 获取 IP 列表...")
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(IP_URL, headers=headers, timeout=15)
         response.raise_for_status()
-        # 按行分割，过滤空白行
         lines = [line.strip() for line in response.text.splitlines() if line.strip()]
         return lines
     except Exception as e:
@@ -47,33 +19,63 @@ def get_ip_list():
         return []
 
 def main():
-    prepare_database()
     raw_ips = get_ip_list()
-    
     if not raw_ips:
         print("⚠️ 未读取到有效 IP 数据，程序终止。")
         return
 
-    result_lines = []
-    print(f"▶ [4/4] 共获取到 {len(raw_ips)} 条数据，开始离线解析...")
+    # 提取纯 IP 列表并去重，同时保留原始对应关系
+    ip_map = {}
+    clean_ips = []
+    for item in raw_ips:
+        clean_ip = item.split("#")[0].split(":")[0].strip()
+        if clean_ip and clean_ip not in ip_map:
+            clean_ips.append(clean_ip)
+            ip_map[clean_ip] = item
 
-    # 加载本地 GeoLite2 数据库
-    with geoip2.database.Reader(DB_FILE) as reader:
-        for item in raw_ips:
-            # 提取纯 IP（适配可能自带端口的情况，如 1.2.3.4 或 1.2.3.4:80）
-            clean_ip = item.split("#")[0].split(":")[0].strip()
+    print(f"▶ 共提取到 {len(clean_ips)} 个独立 IP，开始通过精准 API 查询归属地...")
+
+    location_results = {}
+    
+    # ipquery.io 支持批量查询（每次最多批量处理，安全起见我们每 50 个一组发送）
+    batch_size = 50
+    for i in range(0, len(clean_ips), batch_size):
+        batch = clean_ips[i:i+batch_size]
+        # 拼接成逗号分隔的字符串进行批量请求
+        query_str = ",".join(batch)
+        try:
+            res = requests.get(f"{BATCH_API_URL}{query_str}", timeout=15)
+            if res.status_code == 200:
+                data = res.json()
+                # 如果是多条数据，返回的是一个列表
+                if isinstance(data, list):
+                    for item_data in data:
+                        ip = item_data.get("ip")
+                        # 严格获取国家名称，不进行任何虚假兜底
+                        country = item_data.get("location", {}).get("country")
+                        if country:
+                            location_results[ip] = country
+                elif isinstance(data, dict) and "ip" in data:
+                    # 单条返回的兼容处理
+                    ip = data.get("ip")
+                    country = data.get("location", {}).get("country")
+                    if country:
+                        location_results[ip] = country
             
-            try:
-                # 离线查询地区
-                response = reader.city(clean_ip)
-                # 优先获取中文国家名称，若无则显示英文或默认未知
-                location = response.country.names.get('zh-CN') or response.country.name or "未知地区"
-            except Exception:
-                location = "未知地区"
+            # 适当停顿，防止请求过快
+            time.sleep(0.5)
+        except Exception as e:
+            print(f"⚠️ 批量查询某段 IP 时出错: {e}")
 
-            # 格式化拼接: IP:443#联通天花板大段 地区
-            formatted_line = f"{clean_ip}:443#联通天花板大段 {location}"
-            result_lines.append(formatted_line)
+    # 组装最终结果
+    result_lines = []
+    for raw_item in raw_ips:
+        clean_ip = raw_item.split("#")[0].split(":")[0].strip()
+        # 获取真实的查询结果，如果实在查不到则如实显示“未知地区”（绝对不盲目瞎编兜底）
+        location = location_results.get(clean_ip, "未知地区")
+        
+        formatted_line = f"{clean_ip}:443#联通天花板大段 {location}"
+        result_lines.append(formatted_line)
 
     # 导出文件 output.txt
     output_filename = "output.txt"
