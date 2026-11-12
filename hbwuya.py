@@ -11,48 +11,53 @@ TARGETS = [
     {"name": "新加坡 (SG)", "url": "https://776771.xyz/sg.txt"}
 ]
 
-def fetch_content_from_url(url):
-    """从指定网址获取原始内容并按原样返回行列表"""
+def fetch_content_with_comments(url):
+    """从指定网址获取内容，保留每行的原始 IP 和注释"""
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
-        # 按行切分，过滤空白行，严格保持网站内的原有先后顺序
-        lines = [line.strip() for line in response.text.splitlines() if line.strip()]
-        return lines
+        
+        valid_lines = []
+        for line in response.text.splitlines():
+            line = line.strip()
+            # 过滤空行或非有效数据行
+            if not line:
+                continue
+            valid_lines.append(line)
+                
+        return valid_lines
     except Exception as e:
         print(f"❌ 获取链接 {url} 失败: {e}")
         return []
 
 def main():
     all_result_lines = []
-    print("▶ 开始严格按顺序抓取并合并各地区内容...")
+    print("▶ 开始严格按分类顺序抓取（保留原始内容和注释）...")
 
     for target in TARGETS:
         name = target["name"]
         url = target["url"]
         print(f"正在处理: {name} -> {url}")
         
-        raw_lines = fetch_content_from_url(url)
+        raw_lines = fetch_content_with_comments(url)
         if not raw_lines:
-            print(f"⚠️ 警告: {name} 未获取到任何数据或请求失败。")
+            print(f"⚠️ 警告: {name} 未获取到有效数据。")
             continue
 
-        # 依次追加到总列表中，确保顺序：HK -> TW -> JP -> KR -> US -> SG
-        for item in raw_lines:
-            if item:
-                all_result_lines.append(item)
+        # 严格按顺序追加该分类下的所有带注释的内容
+        all_result_lines.extend(raw_lines)
+        print(f"✅ {name} 处理完成，收录 {len(raw_lines)} 行。")
 
-        print(f"✅ {name} 抓取成功，获取到 {len(raw_lines)} 行数据。")
         # 稍微停顿，对服务器友好
         time.sleep(0.3)
 
-    # 写入 wuya.txt（覆盖写入，确保不会残留旧数据）
+    # 写入 wuya.txt（覆盖写入）
     output_filename = "wuya.txt"
     with open(output_filename, "w", encoding="utf-8") as f:
         f.write("\n".join(all_result_lines) + "\n")
     
-    print(f"\n🎉 全部完成！已生成 {output_filename}，总计合并了 {len(all_result_lines)} 行数据。")
+    print(f"\n🎉 全部完成！已生成 {output_filename}，总计合并了 {len(all_result_lines)} 行带注释的数据。")
 
 if __name__ == "__main__":
     main()
